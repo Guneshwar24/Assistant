@@ -1,84 +1,58 @@
 import streamlit as st
-import speech_recognition as sr
+import whisper
+from langchain_community.llms import Ollama
+import tempfile
 import os
-from pydub import AudioSegment
-import subprocess
 
-def check_ffmpeg():
-    try:
-        subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True, shell=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+# Initialize models
+@st.cache_resource
+def load_whisper_model():
+    return whisper.load_model("base")
 
-def convert_to_wav(input_file, output_file):
-    try:
-        audio = AudioSegment.from_file(input_file)
-        audio.export(output_file, format="wav")
-    except Exception as e:
-        st.error(f"Error converting audio: {str(e)}. Please ensure FFmpeg is installed and added to your system PATH.")
-        return False
-    return True
+@st.cache_resource
+def load_ollama_model():
+    return Ollama(model="gemma2:2b")
 
-def transcribe_audio(audio_file):
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(audio_file) as source:
-        audio = recognizer.record(source)
-    try:
-        return recognizer.recognize_google(audio)
-    except sr.UnknownValueError:
-        return "Google Speech Recognition could not understand the audio"
-    except sr.RequestError as e:
-        return f"Could not request results from Google Speech Recognition service; {e}"
+whisper_model = load_whisper_model()
+llm = load_ollama_model()
 
-def main():
-    st.title("Audio Transcription App for Windows")
+def process_audio(audio_file):
+    # Transcribe
+    result = whisper_model.transcribe(audio_file)
+    return result["text"]
 
-    if not check_ffmpeg():
-        st.warning("FFmpeg is not installed or not in PATH. Please install FFmpeg and add it to your system PATH.")
-        st.info("Download FFmpeg from https://github.com/BtbN/FFmpeg-Builds/releases and add the 'bin' folder to your system PATH.")
+st.title("Audio Transcription and Analysis App")
 
-    # Language selection
-    languages = st.multiselect(
-        "Select the languages present in the audio:",
-        ["English", "Norwegian", "Spanish", "French", "German", "Mandarin", "Japanese", "Other"]
-    )
+uploaded_file = st.file_uploader("Choose an audio file", type=['wav', 'mp3', 'ogg'])
 
-    # Audio upload
-    st.header("Upload Audio")
-    uploaded_file = st.file_uploader("Choose an audio file", type=['wav', 'mp3', 'ogg'])
+if uploaded_file is not None:
+    st.audio(uploaded_file, format='audio/wav')
     
-    if uploaded_file is not None:
-        # Save the uploaded file temporarily
-        with open("temp_audio_file", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        # Convert to WAV if necessary
-        if uploaded_file.name.endswith(('.mp3', '.ogg')):
-            if not convert_to_wav("temp_audio_file", "temp_audio_file.wav"):
-                st.error("Audio conversion failed. Please ensure FFmpeg is installed correctly.")
-                if os.path.exists("temp_audio_file"):
-                    os.remove("temp_audio_file")
-                return
-        else:
-            os.rename("temp_audio_file", "temp_audio_file.wav")
+    if st.button("Process Audio"):
+        with st.spinner("Processing audio..."):
+            # Save uploaded file temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
 
-        st.audio("temp_audio_file.wav", format='audio/wav')
+            # Process the audio
+            transcript = process_audio(tmp_file_path)
+            
+            # Remove temporary file
+            os.unlink(tmp_file_path)
 
-        # Transcribe uploaded audio
-        if st.button("Transcribe Audio"):
-            with st.spinner("Transcribing..."):
-                transcription = transcribe_audio("temp_audio_file.wav")
-            st.write("Transcription:")
-            st.write(transcription)
+        st.subheader("Transcript:")
+        st.text_area("", transcript, height=300)
 
-        # Clean up the temporary file
-        if os.path.exists("temp_audio_file.wav"):
-            os.remove("temp_audio_file.wav")
+        with st.spinner("Analyzing transcript..."):
+            prompt = f"Analyze the following transcript and summarize the main points:\n\n{transcript}"
+            analysis = llm.invoke(prompt)
 
-    # Display selected languages
-    if languages:
-        st.write("Selected languages:", ", ".join(languages))
+        st.subheader("Analysis:")
+        st.write(analysis)
 
-if __name__ == "__main__":
-    main()
+st.sidebar.header("About")
+st.sidebar.info(
+    "This app uses Whisper for transcription and Ollama (Gemma 2B) for transcript analysis. "
+    "Upload an audio file to get started!"
+)
